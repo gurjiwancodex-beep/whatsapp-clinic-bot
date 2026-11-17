@@ -23,10 +23,11 @@ def home():
         "clinic": info.get("clinic_name"),
         "doctor": info.get("doctor_name"),
         "endpoints": {
+            "whatsapp_chat": "/chat (Instant WhatsApp Mobile Simulator)",
             "admin": "/admin (Mobile & Desktop Clinic Info Manager)",
             "appointments": "/appointments (Live Bookings Dashboard)",
             "meta_webhook": "/webhook (Meta WhatsApp)",
-            "twilio_webhook": "/twilio-webhook (Twilio WhatsApp Sandbox)",
+            "twilio_webhook": "/twilio-webhook (Twilio WhatsApp)",
             "health": "/health"
         }
     }
@@ -36,39 +37,243 @@ def health():
     return {"status": "healthy"}
 
 # ========================================================
-# 1. TWILIO WHATSAPP WEBHOOK (/twilio-webhook) - Instant & No Meta Verification!
+# 1. INSTANT WHATSAPP WEB UI FOR MOBILE (/chat)
+# ========================================================
+@app.get("/chat", response_class=HTMLResponse)
+def whatsapp_mobile_chat():
+    info = clinic_manager.get_current_clinic_info()
+    clinic_name = info.get("clinic_name", "Clinic")
+    doctor_name = info.get("doctor_name", "Doctor")
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pa">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <title>{clinic_name} - WhatsApp</title>
+        <style>
+            * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
+            body {{
+                margin: 0;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                background: #e5ddd5;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }}
+            .header {{
+                background: #075e54;
+                color: white;
+                padding: 10px 14px;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+                position: sticky;
+                top: 0;
+                z-index: 10;
+            }}
+            .avatar {{
+                width: 42px;
+                height: 42px;
+                border-radius: 50%;
+                background: #128c7e;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 22px;
+            }}
+            .header-info {{ flex: 1; }}
+            .header-name {{ font-weight: 600; font-size: 16px; margin: 0; }}
+            .header-status {{ font-size: 12px; opacity: 0.85; margin: 0; }}
+            .chat-box {{
+                flex: 1;
+                overflow-y: auto;
+                padding: 14px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }}
+            .msg {{
+                max-width: 80%;
+                padding: 8px 12px;
+                border-radius: 8px;
+                font-size: 14.5px;
+                line-height: 1.4;
+                position: relative;
+                word-wrap: break-word;
+                box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+            }}
+            .msg.bot {{
+                background: #ffffff;
+                align-self: flex-start;
+                border-top-left-radius: 0;
+            }}
+            .msg.user {{
+                background: #dcf8c6;
+                align-self: flex-end;
+                border-top-right-radius: 0;
+            }}
+            .msg-time {{
+                font-size: 10.5px;
+                color: #888;
+                text-align: right;
+                margin-top: 4px;
+            }}
+            .typing {{
+                font-style: italic;
+                color: #555;
+                font-size: 13px;
+                display: none;
+                padding: 6px 12px;
+                background: rgba(255,255,255,0.7);
+                border-radius: 12px;
+                align-self: flex-start;
+            }}
+            .input-bar {{
+                background: #f0f0f0;
+                padding: 8px 10px;
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }}
+            .input-box {{
+                flex: 1;
+                background: white;
+                border: none;
+                border-radius: 24px;
+                padding: 10px 16px;
+                font-size: 15px;
+                outline: none;
+            }}
+            .send-btn {{
+                background: #128c7e;
+                color: white;
+                border: none;
+                width: 44px;
+                height: 44px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                cursor: pointer;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <div class="avatar">🩺</div>
+            <div class="header-info">
+                <p class="header-name">{clinic_name}</p>
+                <p class="header-status" id="status-text">{doctor_name} • 24/7 AI Assistant</p>
+            </div>
+            <a href="/admin" style="color: white; text-decoration: none; font-size: 12px; background: rgba(255,255,255,0.2); padding: 4px 8px; border-radius: 6px;">⚙️ Admin</a>
+        </div>
+
+        <div class="chat-box" id="chat">
+            <div class="msg bot">
+                Sat Sri Akal ji! 🙏 Welcome to {clinic_name}.<br>
+                Mai {doctor_name} ji da AI assistant haan. Assi tuhanu kis trah madad kar sakde haan? 🏥
+                <div class="msg-time">Just now</div>
+            </div>
+            <div class="typing" id="typing">ਬੋਟ ਟਾਈਪ ਕਰ ਰਿਹਾ ਹੈ... (typing...)</div>
+        </div>
+
+        <form class="input-bar" id="chat-form">
+            <input type="text" id="user-input" class="input-box" placeholder="Type a message (ਪੰਜਾਬੀ / English)..." autocomplete="off" required>
+            <button type="submit" class="send-btn">➤</button>
+        </form>
+
+        <script>
+            const form = document.getElementById('chat-form');
+            const input = document.getElementById('user-input');
+            const chat = document.getElementById('chat');
+            const typing = document.getElementById('typing');
+            const senderId = 'web_user_' + Math.floor(Math.random() * 10000);
+
+            function scrollToBottom() {{
+                chat.scrollTop = chat.scrollHeight;
+            }}
+
+            form.addEventListener('submit', async (e) => {{
+                e.preventDefault();
+                const text = input.value.trim();
+                if (!text) return;
+
+                // Add User Message
+                const userMsg = document.createElement('div');
+                userMsg.className = 'msg user';
+                userMsg.innerHTML = text + '<div class="msg-time">Now ✓✓</div>';
+                chat.insertBefore(userMsg, typing);
+                input.value = '';
+                scrollToBottom();
+
+                // Show typing indicator
+                typing.style.display = 'block';
+                scrollToBottom();
+
+                try {{
+                    const res = await fetch('/api/chat', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ sender_id: senderId, message: text }})
+                    }});
+                    const data = await res.json();
+                    
+                    typing.style.display = 'none';
+                    const botMsg = document.createElement('div');
+                    botMsg.className = 'msg bot';
+                    botMsg.innerHTML = data.reply.replace(/\\n/g, '<br>') + '<div class="msg-time">Now</div>';
+                    chat.insertBefore(botMsg, typing);
+                    scrollToBottom();
+                }} catch (err) {{
+                    typing.style.display = 'none';
+                    const errMsg = document.createElement('div');
+                    errMsg.className = 'msg bot';
+                    errMsg.innerText = 'Error connecting to bot server.';
+                    chat.insertBefore(errMsg, typing);
+                    scrollToBottom();
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/api/chat")
+async def api_chat(payload: dict):
+    sender_id = payload.get("sender_id", "web_patient")
+    message = payload.get("message", "").strip()
+    
+    if not message:
+        return {"reply": "Please enter a message."}
+        
+    database.save_message(sender_id=sender_id, role="user", message=message)
+    reply = await ai_service.generate_bot_reply(sender_id=sender_id, incoming_text=message)
+    database.save_message(sender_id=sender_id, role="model", message=reply)
+    
+    return {"reply": reply}
+
+# ========================================================
+# 2. TWILIO WHATSAPP WEBHOOK (/twilio-webhook)
 # ========================================================
 @app.post("/twilio-webhook")
 async def handle_twilio_message(request: Request):
-    """
-    Receives incoming WhatsApp messages from Twilio WhatsApp Sandbox
-    and replies immediately via TwiML.
-    """
     try:
         form_data = await request.form()
-        from_number = form_data.get("From", "")  # e.g., "whatsapp:+919463669667"
+        from_number = form_data.get("From", "")
         body_text = form_data.get("Body", "").strip()
-        
         clean_phone = from_number.replace("whatsapp:", "").strip()
-        logger.info(f"[Twilio WhatsApp] Incoming from {clean_phone}: {body_text}")
         
         if clean_phone and body_text:
-            # 1. Save user message to database
             database.save_message(sender_id=clean_phone, role="user", message=body_text)
-            
-            # 2. Generate AI reply (handles appointment booking logic)
             ai_reply = await ai_service.generate_bot_reply(sender_id=clean_phone, incoming_text=body_text)
-            
-            # 3. Save AI reply to database
             database.save_message(sender_id=clean_phone, role="model", message=ai_reply)
             
-            # 4. Return TwiML XML response (instantly sends the message back to user on WhatsApp!)
-            # Escape XML special chars
-            safe_reply = (
-                ai_reply.replace("&", "&amp;")
-                        .replace("<", "&lt;")
-                        .replace(">", "&gt;")
-            )
+            safe_reply = ai_reply.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>{safe_reply}</Message>
@@ -76,13 +281,12 @@ async def handle_twilio_message(request: Request):
             return Response(content=twiml, media_type="application/xml")
             
         return Response(content="<Response/>", media_type="application/xml")
-
     except Exception as e:
-        logger.error(f"Error handling Twilio webhook: {e}", exc_info=True)
+        logger.error(f"Error handling Twilio webhook: {e}")
         return Response(content="<Response/>", media_type="application/xml")
 
 # ========================================================
-# 2. META WEBHOOK VERIFICATION & HANDLER (/webhook)
+# 3. META WEBHOOK VERIFICATION & HANDLER (/webhook)
 # ========================================================
 @app.get("/webhook")
 async def verify_webhook(
@@ -94,18 +298,16 @@ async def verify_webhook(
         logger.info("Webhook successfully verified by Meta!")
         return PlainTextResponse(content=hub_challenge, status_code=200)
     else:
-        logger.warning("Webhook verification failed: Invalid verify token.")
         raise HTTPException(status_code=403, detail="Verification token mismatch")
 
 async def process_incoming_message(sender_id: str, incoming_text: str):
     try:
-        logger.info(f"Processing message from {sender_id}: {incoming_text}")
         database.save_message(sender_id=sender_id, role="user", message=incoming_text)
         ai_reply = await ai_service.generate_bot_reply(sender_id=sender_id, incoming_text=incoming_text)
         database.save_message(sender_id=sender_id, role="model", message=ai_reply)
         await whatsapp_service.send_whatsapp_message(to_phone=sender_id, text=ai_reply)
     except Exception as e:
-        logger.error(f"Error handling message from {sender_id}: {e}", exc_info=True)
+        logger.error(f"Error handling message from {sender_id}: {e}")
 
 @app.post("/webhook")
 async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTasks):
@@ -113,11 +315,8 @@ async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTa
         body = await request.json()
         entries = body.get("entry", [])
         for entry in entries:
-            changes = entry.get("changes", [])
-            for change in changes:
-                value = change.get("value", {})
-                messages = value.get("messages", [])
-                for msg in messages:
+            for change in entry.get("changes", []):
+                for msg in change.get("value", {}).get("messages", []):
                     if msg.get("type") == "text":
                         sender_phone = msg.get("from")
                         text_body = msg.get("text", {}).get("body", "").strip()
@@ -129,11 +328,10 @@ async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTa
                             )
         return JSONResponse(content={"status": "EVENT_RECEIVED"}, status_code=200)
     except Exception as e:
-        logger.error(f"Error parsing webhook request: {e}")
         return JSONResponse(content={"status": "ERROR", "detail": str(e)}, status_code=200)
 
 # ========================================================
-# 3. MOBILE-FRIENDLY ADMIN PANEL (/admin)
+# 4. MOBILE ADMIN PANEL (/admin)
 # ========================================================
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(saved: bool = False):
@@ -162,12 +360,10 @@ def admin_page(saved: bool = False):
             .form-group {{ margin-bottom: 16px; }}
             label {{ display: block; font-weight: 600; color: #334155; margin-bottom: 6px; font-size: 14px; }}
             input[type="text"], textarea {{ width: 100%; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 15px; font-family: inherit; }}
-            input[type="text"]:focus, textarea:focus {{ outline: none; border-color: #2563eb; }}
             .leave-box {{ background: #fef2f2; border: 1px solid #fecaca; padding: 14px; border-radius: 10px; margin-bottom: 18px; display: flex; align-items: center; gap: 12px; }}
             .leave-box input {{ transform: scale(1.3); cursor: pointer; }}
             .leave-box label {{ margin: 0; color: #991b1b; font-size: 15px; cursor: pointer; }}
-            .btn {{ width: 100%; background: #25D366; color: white; padding: 14px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }}
-            .btn:hover {{ background: #1eb855; }}
+            .btn {{ width: 100%; background: #25D366; color: white; padding: 14px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }}
             .nav {{ display: flex; justify-content: space-between; margin-bottom: 15px; }}
             .nav a {{ color: #2563eb; text-decoration: none; font-size: 14px; font-weight: 500; }}
         </style>
@@ -175,56 +371,41 @@ def admin_page(saved: bool = False):
     <body>
         <div class="card">
             <div class="nav">
+                <a href="/chat">💬 Open WhatsApp Chat</a>
                 <a href="/appointments">📋 View Bookings</a>
-                <span style="color: #64748b; font-size: 13px;">Mobile Admin</span>
             </div>
             <h2>🏥 ਕਲੀਨਿਕ ਜਾਣਕਾਰੀ ਅਪਡੇਟ ਕਰੋ</h2>
             <p class="sub">ਇੱਥੇ ਕੀਤੀ ਕੋਈ ਵੀ ਤਬਦੀਲੀ WhatsApp AI ਤੁਰੰਤ ਸਿੱਖ ਲਵੇਗਾ।</p>
-            
             {saved_banner}
-
             <form action="/admin" method="post">
                 <div class="leave-box">
                     <input type="checkbox" id="leave" name="is_doctor_on_leave" value="true" {checked_attr}>
-                    <label for="leave">🚨 <b>ਡਾਕਟਰ ਸਾਹਿਬ ਅੱਜ ਛੁੱਟੀ 'ਤੇ ਹਨ (Doctor On Leave Today)</b><br><small style="color: #b91c1c;">(ਜੇਕਰ ਇਹ ਟਿੱਕ ਹੋਵੇਗਾ, ਤਾਂ AI ਅੱਜ ਦੀ ਕੋਈ ਬੁਕਿੰਗ ਨਹੀਂ ਕਰੇਗਾ)</small></label>
+                    <label for="leave">🚨 <b>ਡਾਕਟਰ ਸਾਹਿਬ ਅੱਜ ਛੁੱਟੀ 'ਤੇ ਹਨ (Doctor On Leave Today)</b></label>
                 </div>
-
                 <div class="form-group">
                     <label>ਕਲੀਨਿਕ ਦਾ ਨਾਮ (Clinic Name):</label>
                     <input type="text" name="clinic_name" value="{info.get('clinic_name', '')}" required>
                 </div>
-
                 <div class="form-group">
                     <label>ਡਾਕਟਰ ਦਾ ਨਾਮ (Doctor Name):</label>
                     <input type="text" name="doctor_name" value="{info.get('doctor_name', '')}" required>
                 </div>
-
                 <div class="form-group">
                     <label>ਟਾਈਮਿੰਗ (Clinic Hours):</label>
                     <input type="text" name="clinic_hours" value="{info.get('clinic_hours', '')}" required>
                 </div>
-
                 <div class="form-group">
                     <label>ਫੀਸ (Consultation Fee):</label>
                     <input type="text" name="consultation_fee" value="{info.get('consultation_fee', '')}" required>
                 </div>
-
                 <div class="form-group">
                     <label>ਅੱਜ ਦਾ ਖਾਸ ਸੁਨੇਹਾ / ਨੋਟਿਸ (Today's Notice):</label>
                     <textarea name="today_notice" rows="2">{info.get('today_notice', '')}</textarea>
                 </div>
-
                 <div class="form-group">
                     <label>ਸੇਵਾਵਾਂ (Services offered):</label>
                     <input type="text" name="services" value="{info.get('services', '')}">
                 </div>
-
-                <div class="form-group">
-                    <label>ਗੂਗਲ ਸ਼ੀਟ CSV ਲਿੰਕ (Google Sheet CSV Link - Optional):</label>
-                    <input type="text" name="google_sheet_csv_url" placeholder="https://docs.google.com/spreadsheets/.../pub?output=csv" value="{info.get('google_sheet_csv_url', '')}">
-                    <small style="color: #64748b;">(ਜੇਕਰ ਤੁਸੀਂ Google Sheet ਰਾਹੀਂ ਆਟੋਮੈਟਿਕ ਅਪਡੇਟ ਰੱਖਣਾ ਚਾਹੁੰਦੇ ਹੋ)</small>
-                </div>
-
                 <button type="submit" class="btn">💾 ਅਪਡੇਟ ਸੇਵ ਕਰੋ (Save Updates)</button>
             </form>
         </div>
@@ -241,7 +422,6 @@ async def update_admin_info(
     consultation_fee: str = Form(...),
     today_notice: str = Form(""),
     services: str = Form(""),
-    google_sheet_csv_url: str = Form(""),
     is_doctor_on_leave: str = Form(None)
 ):
     updated_data = {
@@ -251,21 +431,18 @@ async def update_admin_info(
         "consultation_fee": consultation_fee.strip(),
         "today_notice": today_notice.strip(),
         "services": services.strip(),
-        "google_sheet_csv_url": google_sheet_csv_url.strip(),
         "is_doctor_on_leave": True if is_doctor_on_leave else False
     }
     clinic_manager.save_local_info(updated_data)
-    logger.info("Clinic information updated via Admin Panel!")
     return RedirectResponse(url="/admin?saved=true", status_code=303)
 
 # ========================================================
-# 4. CLINIC APPOINTMENTS DASHBOARD (/appointments)
+# 5. CLINIC APPOINTMENTS DASHBOARD (/appointments)
 # ========================================================
 @app.get("/appointments", response_class=HTMLResponse)
 def list_appointments():
     info = clinic_manager.get_current_clinic_info()
     appointments = database.get_recent_appointments(limit=50)
-    
     rows_html = ""
     for appt in appointments:
         rows_html += f"""
@@ -282,11 +459,10 @@ def list_appointments():
             <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; color: #64748b;">{appt['created_at']}</td>
         </tr>
         """
-        
     if not rows_html:
-        rows_html = "<tr><td colspan='8' style='text-align: center; padding: 20px; color: #64748b;'>No appointments booked yet. Try chatting with the bot!</td></tr>"
+        rows_html = "<tr><td colspan='8' style='text-align: center; padding: 20px; color: #64748b;'>No appointments booked yet.</td></tr>"
 
-    html_content = f"""
+    html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -300,42 +476,29 @@ def list_appointments():
             p.sub {{ color: #64748b; margin-top: -5px; margin-bottom: 25px; }}
             table {{ width: 100%; border-collapse: collapse; text-align: left; }}
             th {{ background: #f1f5f9; padding: 12px 10px; color: #334155; font-size: 14px; }}
-            .badge {{ background: #25D366; color: white; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: 600; display: inline-block; }}
-            .nav-link {{ display: inline-block; margin-bottom: 15px; color: #2563eb; text-decoration: none; font-weight: 500; font-size: 14px; }}
+            .nav-link {{ display: inline-block; margin-bottom: 15px; color: #2563eb; text-decoration: none; font-weight: 500; font-size: 14px; margin-right: 15px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <a href="/admin" class="nav-link">⚙️ Go to Clinic Admin Settings</a>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <h1>🏥 {info.get('clinic_name')}</h1>
-                    <p class="sub">Doctor: <b>{info.get('doctor_name')}</b> | Live Appointments Dashboard</p>
-                </div>
-                <div class="badge">WhatsApp AI Active</div>
+            <div>
+                <a href="/chat" class="nav-link">💬 Open Live Chat</a>
+                <a href="/admin" class="nav-link">⚙️ Clinic Admin Settings</a>
             </div>
-            
+            <h1>🏥 {info.get('clinic_name')}</h1>
+            <p class="sub">Doctor: <b>{info.get('doctor_name')}</b> | Live Appointments Dashboard</p>
             <div style="overflow-x: auto;">
                 <table>
                     <thead>
                         <tr>
-                            <th>ID</th>
-                            <th>Patient Name</th>
-                            <th>Phone</th>
-                            <th>Date</th>
-                            <th>Time</th>
-                            <th>Reason / Symptoms</th>
-                            <th>Status</th>
-                            <th>Booked At</th>
+                            <th>ID</th><th>Patient Name</th><th>Phone</th><th>Date</th><th>Time</th><th>Reason</th><th>Status</th><th>Booked At</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        {rows_html}
-                    </tbody>
+                    <tbody>{rows_html}</tbody>
                 </table>
             </div>
         </div>
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=html)
