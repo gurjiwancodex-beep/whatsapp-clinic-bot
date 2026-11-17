@@ -1,6 +1,6 @@
 import logging
 from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks, Form
-from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 import config
 import database
 import ai_service
@@ -17,13 +17,16 @@ app = FastAPI(title="WhatsApp AI Clinic Bot", version="1.0.0")
 
 @app.get("/")
 def home():
+    info = clinic_manager.get_current_clinic_info()
     return {
         "status": "online",
-        "clinic": clinic_manager.get_current_clinic_info().get("clinic_name"),
+        "clinic": info.get("clinic_name"),
+        "doctor": info.get("doctor_name"),
         "endpoints": {
             "admin": "/admin (Mobile & Desktop Clinic Info Manager)",
             "appointments": "/appointments (Live Bookings Dashboard)",
-            "webhook": "/webhook (Meta WhatsApp Integration)",
+            "meta_webhook": "/webhook (Meta WhatsApp)",
+            "twilio_webhook": "/twilio-webhook (Twilio WhatsApp Sandbox)",
             "health": "/health"
         }
     }
@@ -33,7 +36,53 @@ def health():
     return {"status": "healthy"}
 
 # ========================================================
-# 1. META WEBHOOK VERIFICATION (GET /webhook)
+# 1. TWILIO WHATSAPP WEBHOOK (/twilio-webhook) - Instant & No Meta Verification!
+# ========================================================
+@app.post("/twilio-webhook")
+async def handle_twilio_message(request: Request):
+    """
+    Receives incoming WhatsApp messages from Twilio WhatsApp Sandbox
+    and replies immediately via TwiML.
+    """
+    try:
+        form_data = await request.form()
+        from_number = form_data.get("From", "")  # e.g., "whatsapp:+919463669667"
+        body_text = form_data.get("Body", "").strip()
+        
+        clean_phone = from_number.replace("whatsapp:", "").strip()
+        logger.info(f"[Twilio WhatsApp] Incoming from {clean_phone}: {body_text}")
+        
+        if clean_phone and body_text:
+            # 1. Save user message to database
+            database.save_message(sender_id=clean_phone, role="user", message=body_text)
+            
+            # 2. Generate AI reply (handles appointment booking logic)
+            ai_reply = await ai_service.generate_bot_reply(sender_id=clean_phone, incoming_text=body_text)
+            
+            # 3. Save AI reply to database
+            database.save_message(sender_id=clean_phone, role="model", message=ai_reply)
+            
+            # 4. Return TwiML XML response (instantly sends the message back to user on WhatsApp!)
+            # Escape XML special chars
+            safe_reply = (
+                ai_reply.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+            )
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>{safe_reply}</Message>
+</Response>"""
+            return Response(content=twiml, media_type="application/xml")
+            
+        return Response(content="<Response/>", media_type="application/xml")
+
+    except Exception as e:
+        logger.error(f"Error handling Twilio webhook: {e}", exc_info=True)
+        return Response(content="<Response/>", media_type="application/xml")
+
+# ========================================================
+# 2. META WEBHOOK VERIFICATION & HANDLER (/webhook)
 # ========================================================
 @app.get("/webhook")
 async def verify_webhook(
@@ -41,11 +90,6 @@ async def verify_webhook(
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
     hub_challenge: str = Query(None, alias="hub.challenge")
 ):
-    """
-    Required by Meta to verify your webhook URL.
-    """
-    logger.info(f"Received webhook verification request: mode={hub_mode}, token={hub_verify_token}")
-    
     if hub_mode == "subscribe" and hub_verify_token == config.WEBHOOK_VERIFY_TOKEN:
         logger.info("Webhook successfully verified by Meta!")
         return PlainTextResponse(content=hub_challenge, status_code=200)
@@ -53,61 +97,37 @@ async def verify_webhook(
         logger.warning("Webhook verification failed: Invalid verify token.")
         raise HTTPException(status_code=403, detail="Verification token mismatch")
 
-# ========================================================
-# 2. INCOMING MESSAGE HANDLER (POST /webhook)
-# ========================================================
 async def process_incoming_message(sender_id: str, incoming_text: str):
-    """
-    Asynchronously processes the message, calls Gemini AI, and replies on WhatsApp.
-    """
     try:
         logger.info(f"Processing message from {sender_id}: {incoming_text}")
-        
-        # Save user message to database
         database.save_message(sender_id=sender_id, role="user", message=incoming_text)
-        
-        # Generate AI response (handles dynamic prompt & appointment booking)
         ai_reply = await ai_service.generate_bot_reply(sender_id=sender_id, incoming_text=incoming_text)
-        
-        # Save AI reply to database
         database.save_message(sender_id=sender_id, role="model", message=ai_reply)
-        
-        # Send response back to patient on WhatsApp
         await whatsapp_service.send_whatsapp_message(to_phone=sender_id, text=ai_reply)
-
     except Exception as e:
         logger.error(f"Error handling message from {sender_id}: {e}", exc_info=True)
 
 @app.post("/webhook")
 async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTasks):
-    """
-    Receives incoming WhatsApp messages from Meta Cloud API.
-    """
     try:
         body = await request.json()
-        logger.debug(f"Webhook Payload: {body}")
-        
         entries = body.get("entry", [])
         for entry in entries:
             changes = entry.get("changes", [])
             for change in changes:
                 value = change.get("value", {})
                 messages = value.get("messages", [])
-                
                 for msg in messages:
                     if msg.get("type") == "text":
                         sender_phone = msg.get("from")
                         text_body = msg.get("text", {}).get("body", "").strip()
-                        
                         if sender_phone and text_body:
                             background_tasks.add_task(
                                 process_incoming_message,
                                 sender_id=sender_phone,
                                 incoming_text=text_body
                             )
-                            
         return JSONResponse(content={"status": "EVENT_RECEIVED"}, status_code=200)
-
     except Exception as e:
         logger.error(f"Error parsing webhook request: {e}")
         return JSONResponse(content={"status": "ERROR", "detail": str(e)}, status_code=200)
@@ -117,9 +137,6 @@ async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTa
 # ========================================================
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(saved: bool = False):
-    """
-    Mobile-friendly control panel to update doctor leave, timings, fees, and notices.
-    """
     info = clinic_manager.load_local_info()
     saved_banner = """
     <div style="background: #dcfce7; border: 1px solid #86efac; color: #166534; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-weight: 500;">
@@ -227,9 +244,6 @@ async def update_admin_info(
     google_sheet_csv_url: str = Form(""),
     is_doctor_on_leave: str = Form(None)
 ):
-    """
-    Saves updates from the mobile admin panel.
-    """
     updated_data = {
         "clinic_name": clinic_name.strip(),
         "doctor_name": doctor_name.strip(),
@@ -249,9 +263,6 @@ async def update_admin_info(
 # ========================================================
 @app.get("/appointments", response_class=HTMLResponse)
 def list_appointments():
-    """
-    Live HTML dashboard to see all booked appointments.
-    """
     info = clinic_manager.get_current_clinic_info()
     appointments = database.get_recent_appointments(limit=50)
     
