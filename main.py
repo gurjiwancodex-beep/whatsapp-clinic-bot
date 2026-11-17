@@ -1,0 +1,330 @@
+import logging
+from fastapi import FastAPI, Request, Query, HTTPException, BackgroundTasks, Form
+from fastapi.responses import PlainTextResponse, HTMLResponse, JSONResponse, RedirectResponse
+import config
+import database
+import ai_service
+import whatsapp_service
+import clinic_manager
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("whatsapp_clinic_bot")
+
+app = FastAPI(title="WhatsApp AI Clinic Bot", version="1.0.0")
+
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "clinic": clinic_manager.get_current_clinic_info().get("clinic_name"),
+        "endpoints": {
+            "admin": "/admin (Mobile & Desktop Clinic Info Manager)",
+            "appointments": "/appointments (Live Bookings Dashboard)",
+            "webhook": "/webhook (Meta WhatsApp Integration)",
+            "health": "/health"
+        }
+    }
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+# ========================================================
+# 1. META WEBHOOK VERIFICATION (GET /webhook)
+# ========================================================
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+    hub_challenge: str = Query(None, alias="hub.challenge")
+):
+    """
+    Required by Meta to verify your webhook URL.
+    """
+    logger.info(f"Received webhook verification request: mode={hub_mode}, token={hub_verify_token}")
+    
+    if hub_mode == "subscribe" and hub_verify_token == config.WEBHOOK_VERIFY_TOKEN:
+        logger.info("Webhook successfully verified by Meta!")
+        return PlainTextResponse(content=hub_challenge, status_code=200)
+    else:
+        logger.warning("Webhook verification failed: Invalid verify token.")
+        raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+# ========================================================
+# 2. INCOMING MESSAGE HANDLER (POST /webhook)
+# ========================================================
+async def process_incoming_message(sender_id: str, incoming_text: str):
+    """
+    Asynchronously processes the message, calls Gemini AI, and replies on WhatsApp.
+    """
+    try:
+        logger.info(f"Processing message from {sender_id}: {incoming_text}")
+        
+        # Save user message to database
+        database.save_message(sender_id=sender_id, role="user", message=incoming_text)
+        
+        # Generate AI response (handles dynamic prompt & appointment booking)
+        ai_reply = await ai_service.generate_bot_reply(sender_id=sender_id, incoming_text=incoming_text)
+        
+        # Save AI reply to database
+        database.save_message(sender_id=sender_id, role="model", message=ai_reply)
+        
+        # Send response back to patient on WhatsApp
+        await whatsapp_service.send_whatsapp_message(to_phone=sender_id, text=ai_reply)
+
+    except Exception as e:
+        logger.error(f"Error handling message from {sender_id}: {e}", exc_info=True)
+
+@app.post("/webhook")
+async def handle_whatsapp_event(request: Request, background_tasks: BackgroundTasks):
+    """
+    Receives incoming WhatsApp messages from Meta Cloud API.
+    """
+    try:
+        body = await request.json()
+        logger.debug(f"Webhook Payload: {body}")
+        
+        entries = body.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                messages = value.get("messages", [])
+                
+                for msg in messages:
+                    if msg.get("type") == "text":
+                        sender_phone = msg.get("from")
+                        text_body = msg.get("text", {}).get("body", "").strip()
+                        
+                        if sender_phone and text_body:
+                            background_tasks.add_task(
+                                process_incoming_message,
+                                sender_id=sender_phone,
+                                incoming_text=text_body
+                            )
+                            
+        return JSONResponse(content={"status": "EVENT_RECEIVED"}, status_code=200)
+
+    except Exception as e:
+        logger.error(f"Error parsing webhook request: {e}")
+        return JSONResponse(content={"status": "ERROR", "detail": str(e)}, status_code=200)
+
+# ========================================================
+# 3. MOBILE-FRIENDLY ADMIN PANEL (/admin)
+# ========================================================
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(saved: bool = False):
+    """
+    Mobile-friendly control panel to update doctor leave, timings, fees, and notices.
+    """
+    info = clinic_manager.load_local_info()
+    saved_banner = """
+    <div style="background: #dcfce7; border: 1px solid #86efac; color: #166534; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-weight: 500;">
+        ✅ ਸਾਰੀ ਜਾਣਕਾਰੀ ਅਪਡੇਟ ਹੋ ਗਈ ਹੈ! (Information updated successfully in AI memory!)
+    </div>
+    """ if saved else ""
+
+    checked_attr = "checked" if info.get("is_doctor_on_leave") else ""
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pa">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ਕਲੀਨਿਕ ਮੈਨੇਜਰ - Clinic Admin</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f5f9; padding: 16px; margin: 0; }}
+            .card {{ max-width: 650px; margin: auto; background: white; padding: 24px; border-radius: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }}
+            h2 {{ margin-top: 0; color: #0f172a; font-size: 22px; }}
+            p.sub {{ color: #64748b; font-size: 14px; margin-top: -6px; margin-bottom: 20px; }}
+            .form-group {{ margin-bottom: 16px; }}
+            label {{ display: block; font-weight: 600; color: #334155; margin-bottom: 6px; font-size: 14px; }}
+            input[type="text"], textarea {{ width: 100%; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 15px; font-family: inherit; }}
+            input[type="text"]:focus, textarea:focus {{ outline: none; border-color: #2563eb; }}
+            .leave-box {{ background: #fef2f2; border: 1px solid #fecaca; padding: 14px; border-radius: 10px; margin-bottom: 18px; display: flex; align-items: center; gap: 12px; }}
+            .leave-box input {{ transform: scale(1.3); cursor: pointer; }}
+            .leave-box label {{ margin: 0; color: #991b1b; font-size: 15px; cursor: pointer; }}
+            .btn {{ width: 100%; background: #25D366; color: white; padding: 14px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }}
+            .btn:hover {{ background: #1eb855; }}
+            .nav {{ display: flex; justify-content: space-between; margin-bottom: 15px; }}
+            .nav a {{ color: #2563eb; text-decoration: none; font-size: 14px; font-weight: 500; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="nav">
+                <a href="/appointments">📋 View Bookings</a>
+                <span style="color: #64748b; font-size: 13px;">Mobile Admin</span>
+            </div>
+            <h2>🏥 ਕਲੀਨਿਕ ਜਾਣਕਾਰੀ ਅਪਡੇਟ ਕਰੋ</h2>
+            <p class="sub">ਇੱਥੇ ਕੀਤੀ ਕੋਈ ਵੀ ਤਬਦੀਲੀ WhatsApp AI ਤੁਰੰਤ ਸਿੱਖ ਲਵੇਗਾ।</p>
+            
+            {saved_banner}
+
+            <form action="/admin" method="post">
+                <div class="leave-box">
+                    <input type="checkbox" id="leave" name="is_doctor_on_leave" value="true" {checked_attr}>
+                    <label for="leave">🚨 <b>ਡਾਕਟਰ ਸਾਹਿਬ ਅੱਜ ਛੁੱਟੀ 'ਤੇ ਹਨ (Doctor On Leave Today)</b><br><small style="color: #b91c1c;">(ਜੇਕਰ ਇਹ ਟਿੱਕ ਹੋਵੇਗਾ, ਤਾਂ AI ਅੱਜ ਦੀ ਕੋਈ ਬੁਕਿੰਗ ਨਹੀਂ ਕਰੇਗਾ)</small></label>
+                </div>
+
+                <div class="form-group">
+                    <label>ਕਲੀਨਿਕ ਦਾ ਨਾਮ (Clinic Name):</label>
+                    <input type="text" name="clinic_name" value="{info.get('clinic_name', '')}" required>
+                </div>
+
+                <div class="form-group">
+                    <label>ਡਾਕਟਰ ਦਾ ਨਾਮ (Doctor Name):</label>
+                    <input type="text" name="doctor_name" value="{info.get('doctor_name', '')}" required>
+                </div>
+
+                <div class="form-group">
+                    <label>ਟਾਈਮਿੰਗ (Clinic Hours):</label>
+                    <input type="text" name="clinic_hours" value="{info.get('clinic_hours', '')}" required>
+                </div>
+
+                <div class="form-group">
+                    <label>ਫੀਸ (Consultation Fee):</label>
+                    <input type="text" name="consultation_fee" value="{info.get('consultation_fee', '')}" required>
+                </div>
+
+                <div class="form-group">
+                    <label>ਅੱਜ ਦਾ ਖਾਸ ਸੁਨੇਹਾ / ਨੋਟਿਸ (Today's Notice):</label>
+                    <textarea name="today_notice" rows="2">{info.get('today_notice', '')}</textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>ਸੇਵਾਵਾਂ (Services offered):</label>
+                    <input type="text" name="services" value="{info.get('services', '')}">
+                </div>
+
+                <div class="form-group">
+                    <label>ਗੂਗਲ ਸ਼ੀਟ CSV ਲਿੰਕ (Google Sheet CSV Link - Optional):</label>
+                    <input type="text" name="google_sheet_csv_url" placeholder="https://docs.google.com/spreadsheets/.../pub?output=csv" value="{info.get('google_sheet_csv_url', '')}">
+                    <small style="color: #64748b;">(ਜੇਕਰ ਤੁਸੀਂ Google Sheet ਰਾਹੀਂ ਆਟੋਮੈਟਿਕ ਅਪਡੇਟ ਰੱਖਣਾ ਚਾਹੁੰਦੇ ਹੋ)</small>
+                </div>
+
+                <button type="submit" class="btn">💾 ਅਪਡੇਟ ਸੇਵ ਕਰੋ (Save Updates)</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
+
+@app.post("/admin")
+async def update_admin_info(
+    clinic_name: str = Form(...),
+    doctor_name: str = Form(...),
+    clinic_hours: str = Form(...),
+    consultation_fee: str = Form(...),
+    today_notice: str = Form(""),
+    services: str = Form(""),
+    google_sheet_csv_url: str = Form(""),
+    is_doctor_on_leave: str = Form(None)
+):
+    """
+    Saves updates from the mobile admin panel.
+    """
+    updated_data = {
+        "clinic_name": clinic_name.strip(),
+        "doctor_name": doctor_name.strip(),
+        "clinic_hours": clinic_hours.strip(),
+        "consultation_fee": consultation_fee.strip(),
+        "today_notice": today_notice.strip(),
+        "services": services.strip(),
+        "google_sheet_csv_url": google_sheet_csv_url.strip(),
+        "is_doctor_on_leave": True if is_doctor_on_leave else False
+    }
+    clinic_manager.save_local_info(updated_data)
+    logger.info("Clinic information updated via Admin Panel!")
+    return RedirectResponse(url="/admin?saved=true", status_code=303)
+
+# ========================================================
+# 4. CLINIC APPOINTMENTS DASHBOARD (/appointments)
+# ========================================================
+@app.get("/appointments", response_class=HTMLResponse)
+def list_appointments():
+    """
+    Live HTML dashboard to see all booked appointments.
+    """
+    info = clinic_manager.get_current_clinic_info()
+    appointments = database.get_recent_appointments(limit=50)
+    
+    rows_html = ""
+    for appt in appointments:
+        rows_html += f"""
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">#{appt['id']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold;">{appt['patient_name']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{appt['patient_phone']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{appt['appointment_date']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{appt['appointment_time']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{appt['reason']}</td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">
+                <span style="background: #dcfce7; color: #166534; padding: 4px 8px; border-radius: 4px; font-size: 12px;">{appt['status']}</span>
+            </td>
+            <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-size: 12px; color: #64748b;">{appt['created_at']}</td>
+        </tr>
+        """
+        
+    if not rows_html:
+        rows_html = "<tr><td colspan='8' style='text-align: center; padding: 20px; color: #64748b;'>No appointments booked yet. Try chatting with the bot!</td></tr>"
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{info.get('clinic_name')} - Booked Appointments</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; padding: 20px; }}
+            .container {{ max-width: 1000px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+            h1 {{ color: #0f172a; margin-top: 0; }}
+            p.sub {{ color: #64748b; margin-top: -5px; margin-bottom: 25px; }}
+            table {{ width: 100%; border-collapse: collapse; text-align: left; }}
+            th {{ background: #f1f5f9; padding: 12px 10px; color: #334155; font-size: 14px; }}
+            .badge {{ background: #25D366; color: white; padding: 4px 10px; border-radius: 20px; font-size: 13px; font-weight: 600; display: inline-block; }}
+            .nav-link {{ display: inline-block; margin-bottom: 15px; color: #2563eb; text-decoration: none; font-weight: 500; font-size: 14px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <a href="/admin" class="nav-link">⚙️ Go to Clinic Admin Settings</a>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1>🏥 {info.get('clinic_name')}</h1>
+                    <p class="sub">Doctor: <b>{info.get('doctor_name')}</b> | Live Appointments Dashboard</p>
+                </div>
+                <div class="badge">WhatsApp AI Active</div>
+            </div>
+            
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Patient Name</th>
+                            <th>Phone</th>
+                            <th>Date</th>
+                            <th>Time</th>
+                            <th>Reason / Symptoms</th>
+                            <th>Status</th>
+                            <th>Booked At</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)

@@ -1,0 +1,10 @@
+{
+  "clinic_name": "Singla Eye Care",
+  "doctor_name": "Dr. Rajan Singla",
+  "clinic_hours": "Monday to Saturday: 10:00 AM - 2:00 PM, 5:00 PM - 8:00 PM. Sunday: Closed.",
+  "consultation_fee": "₹300",
+  "today_notice": "ਡਾਕਟਰ ਸਾਹਿਬ ਅੱਜ ਆਮ ਵਾਂਗ ਉਪਲਬਧ ਹਨ। (Doctor is available today as usual.)",
+  "services": "General Checkup, Fever, Cough, Diabetes, Blood Pressure, Child Health, Eye Care",
+  "google_sheet_csv_url": "",
+  "is_doctor_on_leave": false
+}
